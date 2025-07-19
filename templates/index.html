@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF发票转XML</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        #pdf-preview { border: 1px solid #ccc; min-height: 400px; }
+        #details-table th, #details-table td { font-size: 0.95rem; }
+    </style>
+</head>
+<body>
+<div class="container mt-5">
+    <h2 class="mb-4">PDF发票转XML工具</h2>
+    <form id="upload-form">
+        <div class="mb-3">
+            <label for="file" class="form-label">选择PDF发票文件：</label>
+            <input class="form-control" type="file" id="file" name="file" accept="application/pdf" required>
+        </div>
+        <button type="button" class="btn btn-primary" id="convert-btn" disabled>转化为XML并下载</button>
+    </form>
+    <div class="mt-4">
+        <h5>PDF预览：</h5>
+        <canvas id="pdf-preview"></canvas>
+    </div>
+    <div class="mt-4" id="details-section" style="display:none;">
+        <div class="alert alert-info p-2 mb-2" style="font-size:0.97rem;">
+            <b>提示：</b>部分PDF（如保险、银行等行业发票）明细内容采用特殊编码，<b>PDF预览区可能无法显示所有细项</b>，请以下方表格为准。
+        </div>
+        <h5>发票明细：</h5>
+        <div id="fields-summary" class="mb-2"></div>
+        <table class="table table-bordered" id="details-table">
+            <thead>
+                <tr>
+                    <th>项目名称</th>
+                    <th>单位</th>
+                    <th>数量</th>
+                    <th>单价</th>
+                    <th>金额</th>
+                    <th>税率</th>
+                    <th>税额</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+<script>
+let pdfFile = null;
+const fileInput = document.getElementById('file');
+const convertBtn = document.getElementById('convert-btn');
+const canvas = document.getElementById('pdf-preview');
+const ctx = canvas.getContext('2d');
+const detailsSection = document.getElementById('details-section');
+const detailsTable = document.getElementById('details-table').querySelector('tbody');
+const fieldsSummary = document.getElementById('fields-summary');
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+fileInput.addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (file && file.type === 'application/pdf') {
+        pdfFile = file;
+        convertBtn.disabled = false;
+        // 预览PDF第一页
+        const fileReader = new FileReader();
+        fileReader.onload = function() {
+            const typedarray = new Uint8Array(this.result);
+            pdfjsLib.getDocument(typedarray).promise.then(function(pdf) {
+                pdf.getPage(1).then(function(page) {
+                    const viewport = page.getViewport({ scale: 1.5 });
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+                    page.render({ canvasContext: ctx, viewport: viewport });
+                });
+            }).catch(function(err) {
+                alert('PDF预览失败: ' + err.message);
+            });
+        };
+        fileReader.readAsArrayBuffer(file);
+        // 自动请求/parse接口，展示明细
+        showDetails(file);
+    } else {
+        pdfFile = null;
+        convertBtn.disabled = true;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        detailsSection.style.display = 'none';
+    }
+});
+
+function showDetails(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    fetch('/parse', {
+        method: 'POST',
+        body: formData
+    }).then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            detailsSection.style.display = 'none';
+            alert('明细解析失败：' + data.error);
+            return;
+        }
+        // 展示关键信息
+        const f = data.fields;
+        fieldsSummary.innerHTML =
+            `<b>发票号码：</b> ${f.InvoiceNumber || ''} &nbsp; <b>开票日期：</b> ${f.IssueTime || ''} &nbsp; <b>买方：</b> ${f.BuyerName || ''} &nbsp; <b>卖方：</b> ${f.SellerName || ''}`;
+        // 展示明细表格
+        detailsTable.innerHTML = '';
+        (data.items || []).forEach(item => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${item.ItemName || ''}</td>
+                <td>${item.MeaUnits || ''}</td>
+                <td>${item.Quantity || ''}</td>
+                <td>${item.UnPrice || ''}</td>
+                <td>${item.Amount || ''}</td>
+                <td>${item.TaxRate || ''}</td>
+                <td>${item.ComTaxAm || ''}</td>
+            `;
+            detailsTable.appendChild(tr);
+        });
+        detailsSection.style.display = 'block';
+    }).catch(err => {
+        detailsSection.style.display = 'none';
+        alert('明细解析失败：' + err.message);
+    });
+}
+
+convertBtn.addEventListener('click', function() {
+    if (!pdfFile) return;
+    const formData = new FormData();
+    formData.append('file', pdfFile);
+    convertBtn.disabled = true;
+    convertBtn.textContent = '正在转化...';
+    fetch('/convert', {
+        method: 'POST',
+        body: formData
+    }).then(response => {
+        convertBtn.disabled = false;
+        convertBtn.textContent = '转化为XML并下载';
+        if (!response.ok) {
+            alert('转化失败，请检查PDF内容或稍后重试');
+            return;
+        }
+        return response.blob();
+    }).then(blob => {
+        if (!blob) return;
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = pdfFile.name.replace(/\.pdf$/i, '.xml');
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+    });
+});
+</script>
+</body>
+</html> 
